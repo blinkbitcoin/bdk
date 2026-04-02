@@ -380,15 +380,15 @@ where
             true => max_addresses,
         };
         debug!("max_address {}", max_address);
-        if self
-            .database
-            .borrow()
-            .get_script_pubkey_from_path(KeychainKind::External, max_address.saturating_sub(1))?
-            .is_none()
-        {
+        let external_cached = self.cached_addresses_count(KeychainKind::External, max_address)?;
+        if external_cached < max_address {
             debug!("caching external addresses");
             new_addresses_cached = true;
-            self.cache_addresses(KeychainKind::External, 0, max_address)?;
+            self.cache_addresses(
+                KeychainKind::External,
+                external_cached,
+                max_address - external_cached,
+            )?;
         }
 
         if let Some(change_descriptor) = &self.change_descriptor {
@@ -397,18 +397,55 @@ where
                 true => max_addresses,
             };
 
-            if self
-                .database
-                .borrow()
-                .get_script_pubkey_from_path(KeychainKind::Internal, max_address.saturating_sub(1))?
-                .is_none()
-            {
+            let internal_cached =
+                self.cached_addresses_count(KeychainKind::Internal, max_address)?;
+            if internal_cached < max_address {
                 debug!("caching internal addresses");
                 new_addresses_cached = true;
-                self.cache_addresses(KeychainKind::Internal, 0, max_address)?;
+                self.cache_addresses(
+                    KeychainKind::Internal,
+                    internal_cached,
+                    max_address - internal_cached,
+                )?;
             }
         }
         Ok(new_addresses_cached)
+    }
+
+    fn cached_addresses_count(
+        &self,
+        keychain: KeychainKind,
+        max_address: u32,
+    ) -> Result<u32, Error> {
+        if max_address == 0 {
+            return Ok(0);
+        }
+
+        let database = self.database.borrow();
+
+        if database
+            .get_script_pubkey_from_path(keychain, max_address - 1)?
+            .is_some()
+        {
+            return Ok(max_address);
+        }
+
+        let mut left = 0_u32;
+        let mut right = max_address;
+
+        while left < right {
+            let mid = left + (right - left) / 2;
+            if database
+                .get_script_pubkey_from_path(keychain, mid)?
+                .is_some()
+            {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+
+        Ok(left)
     }
 
     /// Return whether or not a `script` is part of this wallet (either internal or external)

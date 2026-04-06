@@ -1762,7 +1762,7 @@ where
 
         debug!("Begin sync...");
 
-        // TODO: for the next runs, we cannot reuse the `sync_opts.progress` object due to trait
+        // TODO: for the next runs, we cannot reuse the `progress` object due to trait
         // restrictions
         let mut progress_iter = progress.into_iter();
         let mut new_progress = || {
@@ -1961,7 +1961,7 @@ pub(crate) mod test {
 
     #[derive(Default)]
     struct CountingBlockchain {
-        setup_calls: Arc<AtomicUsize>,
+        setup_with_control_calls: Arc<AtomicUsize>,
         sync_calls: Arc<AtomicUsize>,
         sync_with_control_calls: Arc<AtomicUsize>,
     }
@@ -1978,7 +1978,7 @@ pub(crate) mod test {
             _database: &RefCell<D>,
             _progress_update: Box<dyn Progress>,
         ) -> Result<(), Error> {
-            self.setup_calls.fetch_add(1, Ordering::SeqCst);
+            self.setup_with_control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1997,7 +1997,7 @@ pub(crate) mod test {
             _progress_update: Box<dyn Progress>,
             control: SyncControl,
         ) -> Result<(), Error> {
-            self.setup_calls.fetch_add(1, Ordering::SeqCst);
+            self.setup_with_control_calls.fetch_add(1, Ordering::SeqCst);
             control.check_cancelled()
         }
 
@@ -2048,7 +2048,10 @@ pub(crate) mod test {
             )
             .unwrap();
 
-        assert_eq!(blockchain.setup_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            blockchain.setup_with_control_calls.load(Ordering::SeqCst),
+            0
+        );
         assert_eq!(blockchain.sync_with_control_calls.load(Ordering::SeqCst), 3);
         assert_eq!(blockchain.sync_calls.load(Ordering::SeqCst), 0);
     }

@@ -129,6 +129,21 @@ impl GetBlockHash for AnyBlockchain {
 
 #[maybe_async]
 impl WalletSync for AnyBlockchain {
+    fn wallet_setup_with_control<D: BatchDatabase>(
+        &self,
+        database: &RefCell<D>,
+        progress_update: Box<dyn Progress>,
+        control: SyncControl,
+    ) -> Result<(), Error> {
+        maybe_await!(impl_inner_method!(
+            self,
+            wallet_setup_with_control,
+            database,
+            progress_update,
+            control
+        ))
+    }
+
     fn wallet_sync<D: BatchDatabase>(
         &self,
         database: &RefCell<D>,
@@ -152,6 +167,21 @@ impl WalletSync for AnyBlockchain {
             wallet_setup,
             database,
             progress_update
+        ))
+    }
+
+    fn wallet_sync_with_control<D: BatchDatabase>(
+        &self,
+        database: &RefCell<D>,
+        progress_update: Box<dyn Progress>,
+        control: SyncControl,
+    ) -> Result<(), Error> {
+        maybe_await!(impl_inner_method!(
+            self,
+            wallet_sync_with_control,
+            database,
+            progress_update,
+            control
         ))
     }
 }

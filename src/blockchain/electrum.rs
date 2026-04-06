@@ -114,12 +114,14 @@ impl GetBlockHash for ElectrumBlockchain {
     }
 }
 
-impl WalletSync for ElectrumBlockchain {
-    fn wallet_setup<D: BatchDatabase>(
+impl ElectrumBlockchain {
+    fn wallet_setup_impl<D: BatchDatabase>(
         &self,
         database: &RefCell<D>,
-        _progress_update: Box<dyn Progress>,
+        control: &SyncControl,
     ) -> Result<(), Error> {
+        control.check_cancelled()?;
+
         let mut database = database.borrow_mut();
         let database = database.deref_mut();
         let mut request = script_sync::start(database, self.stop_gap)?;
@@ -138,6 +140,8 @@ impl WalletSync for ElectrumBlockchain {
         let batch_update = loop {
             request = match request {
                 Request::Script(script_req) => {
+                    control.check_cancelled()?;
+
                     let scripts = script_req.request().take(chunk_size);
                     let txids_per_script: Vec<Vec<_>> = self
                         .client
@@ -164,6 +168,8 @@ impl WalletSync for ElectrumBlockchain {
                 }
 
                 Request::Conftime(conftime_req) => {
+                    control.check_cancelled()?;
+
                     // collect up to chunk_size heights to fetch from electrum
                     let needs_block_height = conftime_req
                         .request()
@@ -202,8 +208,10 @@ impl WalletSync for ElectrumBlockchain {
                     conftime_req.satisfy(conftimes)?
                 }
                 Request::Tx(tx_req) => {
+                    control.check_cancelled()?;
+
                     let needs_full = tx_req.request().take(chunk_size);
-                    tx_cache.save_txs(needs_full.clone())?;
+                    tx_cache.save_txs(needs_full.clone(), control)?;
                     let full_transactions = needs_full
                         .map(|txid| tx_cache.get(*txid).ok_or_else(electrum_goof))
                         .collect::<Result<Vec<_>, _>>()?;
@@ -213,7 +221,7 @@ impl WalletSync for ElectrumBlockchain {
                             .filter(|input| !input.previous_output.is_null())
                             .map(|input| &input.previous_output.txid)
                     });
-                    tx_cache.save_txs(input_txs)?;
+                    tx_cache.save_txs(input_txs, control)?;
 
                     let full_details = full_transactions
                         .into_iter()
@@ -247,8 +255,37 @@ impl WalletSync for ElectrumBlockchain {
             }
         };
 
+        control.check_cancelled()?;
         database.commit_batch(batch_update)?;
         Ok(())
+    }
+}
+
+impl WalletSync for ElectrumBlockchain {
+    fn wallet_setup<D: BatchDatabase>(
+        &self,
+        database: &RefCell<D>,
+        _progress_update: Box<dyn Progress>,
+    ) -> Result<(), Error> {
+        self.wallet_setup_impl(database, &SyncControl::default())
+    }
+
+    fn wallet_setup_with_control<D: BatchDatabase>(
+        &self,
+        database: &RefCell<D>,
+        _progress_update: Box<dyn Progress>,
+        control: SyncControl,
+    ) -> Result<(), Error> {
+        self.wallet_setup_impl(database, &control)
+    }
+
+    fn wallet_sync_with_control<D: BatchDatabase>(
+        &self,
+        database: &RefCell<D>,
+        _progress_update: Box<dyn Progress>,
+        control: SyncControl,
+    ) -> Result<(), Error> {
+        self.wallet_setup_impl(database, &control)
     }
 }
 
@@ -266,9 +303,14 @@ impl<'a, 'b, D: Database> TxCache<'a, 'b, D> {
             cache: HashMap::default(),
         }
     }
-    fn save_txs<'c>(&mut self, txids: impl Iterator<Item = &'c Txid>) -> Result<(), Error> {
+    fn save_txs<'c>(
+        &mut self,
+        txids: impl Iterator<Item = &'c Txid>,
+        control: &SyncControl,
+    ) -> Result<(), Error> {
         let mut need_fetch = vec![];
         for txid in txids {
+            control.check_cancelled()?;
             if self.cache.contains_key(txid) {
                 continue;
             } else if let Some(transaction) = self.db.get_raw_tx(txid)? {
@@ -282,6 +324,7 @@ impl<'a, 'b, D: Database> TxCache<'a, 'b, D> {
         // of transactions at once, which creates enormous memory pressure. By chunking the batch
         // into more reasonably sized sub-queries, we allow time for memory to be freed.
         for chunk in need_fetch.chunks(1000) {
+            control.check_cancelled()?;
             let txs = self
                 .client
                 .batch_transaction_get(chunk)

@@ -57,7 +57,7 @@ use signer::{SignOptions, SignerOrdering, SignersContainer, TransactionSigner};
 use tx_builder::{BumpFee, CreateTx, FeePolicy, TxBuilder, TxParams};
 use utils::{check_nsequence_rbf, After, Older, SecpCtx};
 
-use crate::blockchain::{GetHeight, NoopProgress, Progress, WalletSync};
+use crate::blockchain::{GetHeight, NoopProgress, Progress, SyncControl, WalletSync};
 use crate::database::memory::MemoryDatabase;
 use crate::database::{AnyDatabase, BatchDatabase, BatchOperations, DatabaseUtils, SyncTime};
 use crate::descriptor::checksum::calc_checksum_bytes_internal;
@@ -168,6 +168,8 @@ impl fmt::Display for AddressInfo {
 pub struct SyncOptions {
     /// The progress tracker which may be informed when progress is made.
     pub progress: Option<Box<dyn Progress>>,
+    /// Optional cooperative control for cancellation and deadlines.
+    pub sync_control: Option<SyncControl>,
 }
 
 impl<D> Wallet<D>
@@ -1752,11 +1754,17 @@ where
         blockchain: &B,
         sync_opts: SyncOptions,
     ) -> Result<(), Error> {
+        let SyncOptions {
+            progress,
+            sync_control,
+        } = sync_opts;
+        let control = sync_control.unwrap_or_default();
+
         debug!("Begin sync...");
 
-        // TODO: for the next runs, we cannot reuse the `sync_opts.progress` object due to trait
+        // TODO: for the next runs, we cannot reuse the `progress` object due to trait
         // restrictions
-        let mut progress_iter = sync_opts.progress.into_iter();
+        let mut progress_iter = progress.into_iter();
         let mut new_progress = || {
             progress_iter
                 .next()
@@ -1780,9 +1788,17 @@ where
 
         for _ in 0..max_rounds {
             let sync_res = if run_setup {
-                maybe_await!(blockchain.wallet_setup(&self.database, new_progress()))
+                maybe_await!(blockchain.wallet_setup_with_control(
+                    &self.database,
+                    new_progress(),
+                    control.clone(),
+                ))
             } else {
-                maybe_await!(blockchain.wallet_sync(&self.database, new_progress()))
+                maybe_await!(blockchain.wallet_sync_with_control(
+                    &self.database,
+                    new_progress(),
+                    control.clone(),
+                ))
             };
 
             // If the error is the special `MissingCachedScripts` error, we return the number of
@@ -1819,6 +1835,18 @@ where
         self.database.borrow_mut().set_sync_time(sync_time)?;
 
         Ok(())
+    }
+
+    /// Sync the internal database with the blockchain using cooperative cancellation control.
+    #[maybe_async]
+    pub fn sync_with_control<B: WalletSync + GetHeight>(
+        &self,
+        blockchain: &B,
+        mut sync_opts: SyncOptions,
+        control: SyncControl,
+    ) -> Result<(), Error> {
+        sync_opts.sync_control = Some(control);
+        maybe_await!(self.sync(blockchain, sync_opts))
     }
 
     /// Return the checksum of the public descriptor associated to `keychain`
@@ -1911,8 +1939,12 @@ pub fn get_funded_wallet(
 pub(crate) mod test {
     use assert_matches::assert_matches;
     use bitcoin::{absolute, blockdata::script::PushBytes, psbt, Network, Sequence};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
+    use crate::blockchain::{GetHeight, SyncControl, WalletSync};
     use crate::database::Database;
+    use crate::database::{BatchDatabase, MemoryDatabase};
     use crate::types::KeychainKind;
 
     use super::*;
@@ -1927,6 +1959,59 @@ pub(crate) mod test {
     // OP_PUSH.
     const P2WPKH_FAKE_WITNESS_SIZE: usize = 106;
 
+    #[derive(Default)]
+    struct CountingBlockchain {
+        setup_with_control_calls: Arc<AtomicUsize>,
+        sync_calls: Arc<AtomicUsize>,
+        sync_with_control_calls: Arc<AtomicUsize>,
+    }
+
+    impl GetHeight for CountingBlockchain {
+        fn get_height(&self) -> Result<u32, Error> {
+            Ok(100)
+        }
+    }
+
+    impl WalletSync for CountingBlockchain {
+        fn wallet_setup<D: BatchDatabase>(
+            &self,
+            _database: &RefCell<D>,
+            _progress_update: Box<dyn Progress>,
+        ) -> Result<(), Error> {
+            self.setup_with_control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn wallet_sync<D: BatchDatabase>(
+            &self,
+            _database: &RefCell<D>,
+            _progress_update: Box<dyn Progress>,
+        ) -> Result<(), Error> {
+            self.sync_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn wallet_setup_with_control<D: BatchDatabase>(
+            &self,
+            _database: &RefCell<D>,
+            _progress_update: Box<dyn Progress>,
+            control: SyncControl,
+        ) -> Result<(), Error> {
+            self.setup_with_control_calls.fetch_add(1, Ordering::SeqCst);
+            control.check_cancelled()
+        }
+
+        fn wallet_sync_with_control<D: BatchDatabase>(
+            &self,
+            _database: &RefCell<D>,
+            _progress_update: Box<dyn Progress>,
+            control: SyncControl,
+        ) -> Result<(), Error> {
+            self.sync_with_control_calls.fetch_add(1, Ordering::SeqCst);
+            control.check_cancelled()
+        }
+    }
+
     #[test]
     fn test_descriptor_checksum() {
         let (wallet, _, _) = get_funded_wallet(get_test_wpkh());
@@ -1936,6 +2021,97 @@ pub(crate) mod test {
             calc_checksum(&wallet.descriptor.to_string()).unwrap(),
             checksum
         );
+    }
+
+    #[test]
+    fn test_sync_with_control_uses_wallet_sync_with_control() {
+        let wallet = Wallet::new(
+            get_test_wpkh(),
+            None,
+            Network::Regtest,
+            MemoryDatabase::new(),
+        )
+        .unwrap();
+        let blockchain = CountingBlockchain::default();
+
+        wallet.sync(&blockchain, SyncOptions::default()).unwrap();
+        wallet
+            .sync_with_control(&blockchain, SyncOptions::default(), SyncControl::default())
+            .unwrap();
+        wallet
+            .sync(
+                &blockchain,
+                SyncOptions {
+                    progress: None,
+                    sync_control: Some(SyncControl::default()),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            blockchain.setup_with_control_calls.load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(blockchain.sync_with_control_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(blockchain.sync_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_sync_with_control_cancellation_propagates() {
+        let wallet = Wallet::new(
+            get_test_wpkh(),
+            None,
+            Network::Regtest,
+            MemoryDatabase::new(),
+        )
+        .unwrap();
+        let blockchain = CountingBlockchain::default();
+
+        wallet.sync(&blockchain, SyncOptions::default()).unwrap();
+
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let err = wallet
+            .sync(
+                &blockchain,
+                SyncOptions {
+                    progress: None,
+                    sync_control: Some(SyncControl {
+                        cancel: Some(cancel),
+                        deadline: None,
+                    }),
+                },
+            )
+            .unwrap_err();
+
+        assert_matches!(err, Error::SyncCancelled);
+    }
+
+    #[test]
+    fn test_sync_with_control_cancellation_propagates_on_setup_path() {
+        let wallet = Wallet::new(
+            "wpkh(tpubEBr4i6yk5nf5DAaJpsi9N2pPYBeJ7fZ5Z9rmN4977iYLCGco1VyjB9tvvuvYtfZzjD5A8igzgw3HeWeeKFmanHYqksqZXYXGsw5zjnj7KM9/*)",
+            None,
+            Network::Testnet,
+            MemoryDatabase::new(),
+        )
+        .unwrap();
+        let blockchain = CountingBlockchain::default();
+
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let err = wallet
+            .sync(
+                &blockchain,
+                SyncOptions {
+                    progress: None,
+                    sync_control: Some(SyncControl {
+                        cancel: Some(cancel),
+                        deadline: None,
+                    }),
+                },
+            )
+            .unwrap_err();
+
+        assert_matches!(err, Error::SyncCancelled);
     }
 
     #[test]

@@ -19,8 +19,10 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::time::Instant;
 
 use bitcoin::{BlockHash, Transaction, Txid};
 
@@ -119,6 +121,35 @@ pub trait GetBlockHash {
 }
 
 /// Trait for blockchains that can sync by updating the database directly.
+#[derive(Debug, Clone, Default)]
+pub struct SyncControl {
+    /// Shared cancellation flag observed by sync checkpoints.
+    pub cancel: Option<Arc<AtomicBool>>,
+    /// Deadline after which sync should abort at the next checkpoint.
+    pub deadline: Option<Instant>,
+}
+
+impl SyncControl {
+    /// Return true if cancellation should occur.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .map_or(false, |cancel| cancel.load(Ordering::Relaxed))
+            || self
+                .deadline
+                .map_or(false, |deadline| Instant::now() >= deadline)
+    }
+
+    /// Return an error when cancellation is requested.
+    pub fn check_cancelled(&self) -> Result<(), Error> {
+        if self.is_cancelled() {
+            return Err(Error::SyncCancelled);
+        }
+
+        Ok(())
+    }
+}
+
 #[maybe_async]
 pub trait WalletSync {
     /// Setup the backend and populate the internal database for the first time
@@ -137,6 +168,18 @@ pub trait WalletSync {
         database: &RefCell<D>,
         progress_update: Box<dyn Progress>,
     ) -> Result<(), Error>;
+
+    /// Like [`Self::wallet_setup`], but with cooperative cancellation support.
+    ///
+    /// Default implementation preserves current behavior and ignores `control`.
+    fn wallet_setup_with_control<D: BatchDatabase>(
+        &self,
+        database: &RefCell<D>,
+        progress_update: Box<dyn Progress>,
+        _control: SyncControl,
+    ) -> Result<(), Error> {
+        maybe_await!(self.wallet_setup(database, progress_update))
+    }
 
     /// If not overridden, it defaults to calling [`Self::wallet_setup`] internally.
     ///
@@ -161,6 +204,18 @@ pub trait WalletSync {
         progress_update: Box<dyn Progress>,
     ) -> Result<(), Error> {
         maybe_await!(self.wallet_setup(database, progress_update))
+    }
+
+    /// Like [`Self::wallet_sync`], but with cooperative cancellation support.
+    ///
+    /// Default implementation preserves current behavior and ignores `control`.
+    fn wallet_sync_with_control<D: BatchDatabase>(
+        &self,
+        database: &RefCell<D>,
+        progress_update: Box<dyn Progress>,
+        _control: SyncControl,
+    ) -> Result<(), Error> {
+        maybe_await!(self.wallet_sync(database, progress_update))
     }
 }
 
@@ -381,11 +436,33 @@ impl<T: WalletSync> WalletSync for Arc<T> {
         maybe_await!(self.deref().wallet_setup(database, progress_update))
     }
 
+    fn wallet_setup_with_control<D: BatchDatabase>(
+        &self,
+        database: &RefCell<D>,
+        progress_update: Box<dyn Progress>,
+        control: SyncControl,
+    ) -> Result<(), Error> {
+        maybe_await!(self
+            .deref()
+            .wallet_setup_with_control(database, progress_update, control))
+    }
+
     fn wallet_sync<D: BatchDatabase>(
         &self,
         database: &RefCell<D>,
         progress_update: Box<dyn Progress>,
     ) -> Result<(), Error> {
         maybe_await!(self.deref().wallet_sync(database, progress_update))
+    }
+
+    fn wallet_sync_with_control<D: BatchDatabase>(
+        &self,
+        database: &RefCell<D>,
+        progress_update: Box<dyn Progress>,
+        control: SyncControl,
+    ) -> Result<(), Error> {
+        maybe_await!(self
+            .deref()
+            .wallet_sync_with_control(database, progress_update, control))
     }
 }

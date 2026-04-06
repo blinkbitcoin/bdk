@@ -130,6 +130,8 @@ pub enum Error {
     /// [`crate::blockchain::WalletSync`] sync attempt failed due to missing scripts in cache which
     /// are needed to satisfy `stop_gap`.
     MissingCachedScripts(MissingCachedScripts),
+    /// [`crate::blockchain::WalletSync`] sync was cancelled by cooperative control.
+    SyncCancelled,
 
     #[cfg(feature = "electrum")]
     /// Electrum client error
@@ -258,6 +260,7 @@ impl fmt::Display for Error {
             Self::MissingCachedScripts(missing_cached_scripts) => {
                 write!(f, "Missing cached scripts: {:?}", missing_cached_scripts)
             }
+            Self::SyncCancelled => write!(f, "Wallet sync cancelled"),
             #[cfg(feature = "electrum")]
             Self::Electrum(err) => write!(f, "Electrum client error: {}", err),
             #[cfg(feature = "esplora")]

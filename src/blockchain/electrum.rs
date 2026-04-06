@@ -115,7 +115,7 @@ impl GetBlockHash for ElectrumBlockchain {
 }
 
 impl ElectrumBlockchain {
-    fn wallet_setup_with_control<D: BatchDatabase>(
+    fn wallet_setup_impl<D: BatchDatabase>(
         &self,
         database: &RefCell<D>,
         control: &SyncControl,
@@ -267,7 +267,7 @@ impl WalletSync for ElectrumBlockchain {
         database: &RefCell<D>,
         _progress_update: Box<dyn Progress>,
     ) -> Result<(), Error> {
-        self.wallet_setup_with_control(database, &SyncControl::default())
+        self.wallet_setup_impl(database, &SyncControl::default())
     }
 
     fn wallet_setup_with_control<D: BatchDatabase>(
@@ -276,7 +276,7 @@ impl WalletSync for ElectrumBlockchain {
         _progress_update: Box<dyn Progress>,
         control: SyncControl,
     ) -> Result<(), Error> {
-        self.wallet_setup_with_control(database, &control)
+        self.wallet_setup_impl(database, &control)
     }
 
     fn wallet_sync_with_control<D: BatchDatabase>(
@@ -285,7 +285,7 @@ impl WalletSync for ElectrumBlockchain {
         _progress_update: Box<dyn Progress>,
         control: SyncControl,
     ) -> Result<(), Error> {
-        self.wallet_setup_with_control(database, &control)
+        self.wallet_setup_impl(database, &control)
     }
 }
 

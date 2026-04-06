@@ -2086,9 +2086,9 @@ pub(crate) mod test {
     #[test]
     fn test_sync_with_control_cancellation_propagates_on_setup_path() {
         let wallet = Wallet::new(
-            get_test_wpkh(),
+            "wpkh(tpubEBr4i6yk5nf5DAaJpsi9N2pPYBeJ7fZ5Z9rmN4977iYLCGco1VyjB9tvvuvYtfZzjD5A8igzgw3HeWeeKFmanHYqksqZXYXGsw5zjnj7KM9/*)",
             None,
-            Network::Regtest,
+            Network::Testnet,
             MemoryDatabase::new(),
         )
         .unwrap();

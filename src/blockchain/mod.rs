@@ -134,10 +134,10 @@ impl SyncControl {
     pub fn is_cancelled(&self) -> bool {
         self.cancel
             .as_ref()
-            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+            .map_or(false, |cancel| cancel.load(Ordering::Relaxed))
             || self
                 .deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
+                .map_or(false, |deadline| Instant::now() >= deadline)
     }
 
     /// Return an error when cancellation is requested.

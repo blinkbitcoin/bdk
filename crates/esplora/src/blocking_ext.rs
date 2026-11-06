@@ -6,13 +6,15 @@ use bdk_core::{
     bitcoin::{BlockHash, OutPoint, Txid},
     BlockId, CheckPoint, ConfirmationBlockTime, Indexed, TxUpdate,
 };
-use esplora_client::{OutputStatus, Tx};
+use esplora_client::OutputStatus;
 use std::thread::JoinHandle;
 
 use crate::{insert_anchor_or_seen_at_from_status, insert_prevouts};
 
 /// [`esplora_client::Error`]
 pub type Error = Box<esplora_client::Error>;
+
+type EsploraTx = esplora_client::api::EsploraTx;
 
 /// Trait to extend the functionality of [`esplora_client::BlockingClient`].
 ///
@@ -279,7 +281,7 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
     stop_gap: usize,
     parallel_requests: usize,
 ) -> Result<(TxUpdate<ConfirmationBlockTime>, Option<u32>), Error> {
-    type TxsOfSpkIndex = (u32, Vec<esplora_client::Tx>, HashSet<Txid>);
+    type TxsOfSpkIndex = (u32, Vec<EsploraTx>, HashSet<Txid>);
 
     let mut update = TxUpdate::<ConfirmationBlockTime>::default();
     let mut last_active_index = Option::<u32>::None;
@@ -300,7 +302,7 @@ fn fetch_txs_with_keychain_spks<I: Iterator<Item = Indexed<SpkWithExpectedTxids>
                     let mut last_txid = None;
                     let mut spk_txs = Vec::new();
                     loop {
-                        let txs = client.scripthash_txs(&spk, last_txid)?;
+                        let txs = client.get_scripthash_txs(&spk, last_txid)?;
                         let tx_count = txs.len();
                         last_txid = txs.last().map(|tx| tx.txid);
                         spk_txs.extend(txs);
@@ -409,7 +411,7 @@ fn fetch_txs_with_txids<I: IntoIterator<Item = Txid>>(
                         .map(|t| (txid, t))
                 })
             })
-            .collect::<Vec<JoinHandle<Result<(Txid, Option<Tx>), Error>>>>();
+            .collect::<Vec<JoinHandle<Result<(Txid, Option<EsploraTx>), Error>>>>();
 
         if handles.is_empty() {
             break;
@@ -542,7 +544,7 @@ mod test {
         let env = TestEnv::new()?;
         let base_url = format!("http://{}", &env.electrsd.esplora_url.clone().unwrap());
         let client = Builder::new(base_url.as_str()).build_blocking();
-        let initial_height = env.rpc_client().get_block_count()?.into_model().0 as u32;
+        let initial_height = env.rpc_client().get_block_count()?.0 as u32;
 
         let mine_to = 16;
         let _ = env.mine_blocks((mine_to - initial_height) as usize, None)?;
